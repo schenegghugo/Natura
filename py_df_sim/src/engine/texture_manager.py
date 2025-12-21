@@ -27,7 +27,7 @@ class TextureManager:
         # Key: (x, y, level) -> Value: texture_index (int)
         self.node_to_texture_id = {}
 
-    def update(self, visible_nodes, generator):
+    def update(self, visible_nodes, data_manager, generator): 
         """
         Syncs the GPU textures with the Quadtree.
         1. Deletes textures for chunks that went off-screen.
@@ -59,27 +59,24 @@ class TextureManager:
         for node in visible_nodes:
             key = (node.x, node.y, node.level)
             
-            # If we don't have this chunk loaded yet...
             if key not in self.node_to_texture_id:
-                
-                # Safety Check: Do we have VRAM space?
                 if not self.available_indices:
-                    print("WARNING: Texture Pool Exhausted! Increase pool_size.")
                     continue
                 
-                # 1. Grab a free texture index
                 tex_id = self.available_indices.pop()
-                
-                # 2. Register it
                 self.node_to_texture_id[key] = tex_id
                 
-                # 3. GENERATE DATA (The heavy CPU step)
-                # This calls the Generator we just wrote
-                raw_data = generator.generate_chunk_texture(node.x, node.y, node.level)
+                # --- CHANGED SECTION START ---
                 
-                # 4. UPLOAD TO GPU
-                # We reuse the existing texture object, just overwriting its pixels.
-                self.textures[tex_id].write(raw_data)
+                # 1. Get Data (From RAM or Generator)
+                chunk_data = data_manager.get_chunk(node.x, node.y, node.level)
+                
+                # 2. Convert Data to Pixels (Using the helper we made)
+                pixel_data = generator.colorize_chunk(chunk_data.height_map)
+                
+                # --- CHANGED SECTION END ---
+                
+                self.textures[tex_id].write(pixel_data)
 
     def get_texture(self, node):
         """

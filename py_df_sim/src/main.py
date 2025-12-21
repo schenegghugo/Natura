@@ -1,89 +1,80 @@
-import sys
-import os
 import pygame
-import config
-import math
 import moderngl
+import sys
+import config
 
-sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
-
-from engine.chunk_renderer import ChunkRenderer 
-from simulation.world import World
-from simulation.quadtree import QuadtreeManager 
-from engine.line_renderer import LineRenderer 
-from simulation.generator import TerrainGenerator
+# Engine Systems
+from engine.camera import Camera
+from engine.chunk_renderer import ChunkRenderer
+from engine.line_renderer import LineRenderer
 from engine.texture_manager import TextureManager
+from engine.save_manager import SaveManager
 
-class Camera:
-    def __init__(self):
-        self.uv_pos = [0.5, 0.5] 
-        self.zoom = 1.0
-        self.is_dragging = False
-
-    def handle_event(self, event):
-        if event.type == pygame.MOUSEWHEEL:
-            zoom_factor = 1.1
-            if event.y > 0: self.zoom *= zoom_factor
-            elif event.y < 0: self.zoom /= zoom_factor
-            self.zoom = max(1.0, min(100.0, self.zoom))
-
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1:
-                self.is_dragging = True
-                pygame.mouse.get_rel() 
-
-        elif event.type == pygame.MOUSEBUTTONUP:
-            if event.button == 1:
-                self.is_dragging = False
-
-        elif event.type == pygame.MOUSEMOTION:
-            if self.is_dragging:
-                w, h = pygame.display.get_surface().get_size()
-                dx, dy = event.rel
-                
-                # Aspect Ratio Correction:
-                # We divide by height (h) to keep movement proportional
-                uv_dx = (dx / h) / self.zoom
-                uv_dy = (dy / h) / self.zoom
-                
-                # X Axis: Standard
-                self.uv_pos[0] -= uv_dx 
-                
-                # Y Axis: INVERTED
-                # Screen Y is Down-Positive. World Y is Up-Positive.
-                # Dragging Mouse Down (+dy) should move Camera Up (+y) 
-                # to make the world feel like it's being dragged Down.
-                self.uv_pos[1] += uv_dy 
+# Simulation Systems
+from simulation.quadtree import QuadtreeManager
+from simulation.generator import TerrainGenerator
+from simulation.data_manager import DataManager
 
 def main():
-    # 1. Pygame Setup
+    # 1. Pygame & OpenGL Setup
     pygame.init()
     pygame.display.set_mode((config.SCREEN_WIDTH, config.SCREEN_HEIGHT), pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE)
     
-    # 2. ModernGL Context
+    # Create ModernGL Context
     ctx = moderngl.create_context()
-    ctx.enable(moderngl.BLEND)
+    ctx.enable(moderngl.BLEND) # Enable transparency
     
+    # 2. Initialize Persistence Layer
+    save_manager = SaveManager()
+    
+    # Check if a save exists
+    saved_state = save_manager.load_global_state()
+    
+    # Default Defaults
+    seed = 12345
+    start_pos = (0, 0)
+    start_zoom = 1.0
+    
+    if saved_state:
+        print(">>> Save file found! Resuming world...")
+        seed = saved_state['seed']
+        start_pos = (saved_state['camera_x'], saved_state['camera_y'])
+        start_zoom = saved_state['zoom']
+    else:
+        print(">>> No save found. Creating new world.")
+
     # 3. Instantiate Systems
-    camera = Camera()
     
-    # The Brain: Decides what chunks exist
+    # Camera: Handles Viewport
+    camera = Camera()
+    camera.pos = list(start_pos) # Apply loaded position
+    camera.zoom = start_zoom     # Apply loaded zoom
+    
+    # Quadtree: The "Brain" (Spatial partitioning)
     quadtree = QuadtreeManager()
     
-    # The Artist: Creates the noise data
-    generator = TerrainGenerator(seed=12345)
+    # Generator: The "Artist" (Math & Noise)
+    generator = TerrainGenerator(seed=seed)
     
-    # The Gallery: Manages VRAM
+    # DataManager: The "Memory" (RAM + Disk Cache)
+    # This sits between the Generator and the Visuals
+    data_manager = DataManager(generator, save_manager)
+    
+    # TextureManager: The "Gallery" (VRAM Management)
     texture_manager = TextureManager(ctx, pool_size=64)
     
-    # The Painters: Draw to the screen
+    # Renderers: The "Painters"
     chunk_renderer = ChunkRenderer(ctx)
     line_renderer = LineRenderer(ctx)
     
+    # Loop Setup
     clock = pygame.time.Clock()
     running = True
     
-    print("Engine Started. Pan: Mouse Drag. Zoom: Scroll Wheel.")
+    print("\n--- ENGINE STARTED ---")
+    print("Controls: WASD or Drag to Pan | Scroll to Zoom")
+    print("F5: Quick Save | F9: Reload World")
+    print("----------------------\n")
 
     while running:
         # --- A. Input Handling ---
@@ -91,51 +82,82 @@ def main():
         for event in events:
             if event.type == pygame.QUIT:
                 running = False
-            # Pass events to camera
+            
+            # --- SAVE / LOAD CONTROLS ---
+            if event.type == pygame.KEYDOWN:
+                # SAVE
+                if event.key == pygame.K_F5:
+                    print("\n>>> SAVING GAME...")
+                    # 1. Save Camera & Seed
+                    save_manager.save_global_state(generator.seed, camera)
+                    # 2. Save all Modified/Loaded Chunks
+                    data_manager.save_all_loaded_chunks()
+                    print(">>> SAVE COMPLETE.\n")
+                
+                # LOAD (Hot Reload)
+                elif event.key == pygame.K_F9:
+                    print("\n>>> RELOADING FROM DISK...")
+                    saved_state = save_manager.load_global_state()
+                    
+                    if saved_state:
+                        # 1. Restore Camera
+                        camera.pos = [saved_state['camera_x'], saved_state['camera_y']]
+                        camera.zoom = saved_state['zoom']
+                        
+                        # 2. Flush RAM (Data Manager)
+                        # We clear the cache so the engine is forced to re-fetch from Disk/Generator
+                        data_manager.loaded_chunks.clear()
+                        
+                        # 3. Flush VRAM (Texture Manager)
+                        # We reset the texture slots so the visuals update immediately
+                        texture_manager.node_to_texture_id.clear()
+                        texture_manager.available_indices = list(range(texture_manager.pool_size))
+                        
+                        print(">>> RELOAD COMPLETE.\n")
+                    else:
+                        print(">>> NO SAVE FOUND.\n")
+
+            # Pass generic events to camera
             camera.handle_event(event)
         
-        # --- B. Simulation / Logic Updates ---
+        # --- B. Simulation Updates ---
         
-        # 1. Update Camera Physics (Momentum, Zoom smoothing)
-        # (Assuming you have a simple .update() in Camera, if not, it's fine)
+        # 1. Update Quadtree
+        # Calculates which chunks should be visible based on camera pos
+        quadtree.update(camera.pos, camera.zoom)
         
-        # 2. Update Quadtree (The "Active Set")
-        # Calculates which grid squares are currently visible based on camera
-        quadtree.update(camera.uv_pos, camera.zoom)
-        
-        # 3. Update Texture Manager (The "Streaming")
-        # - Checks which nodes from the Quadtree are new.
-        # - Generates noise for them using the Generator.
-        # - Uploads them to GPU.
-        # - Recycles old textures.
-        texture_manager.update(quadtree.visible_nodes, generator)
+        # 2. Update Textures
+        # - Checks Visible Nodes
+        # - Asks DataManager for data (Check RAM -> Check Disk -> Generate)
+        # - Uploads to GPU
+        texture_manager.update(quadtree.visible_nodes, data_manager, generator)
         
         # --- C. Rendering ---
         
-        # 1. Clear Screen (Dark Grey background)
+        # 1. Clear Screen (Dark Grey)
         ctx.clear(0.1, 0.1, 0.1)
         
-        # 2. Render the Terrain Chunks
+        # 2. Draw Terrain
         chunk_renderer.render(
             quadtree.visible_nodes, 
             texture_manager, 
-            camera.uv_pos, 
+            camera.pos, 
             camera.zoom
         )
         
-        # 3. Render Debug Lines (Optional - Toggle this to see the grid!)
+        # 3. Draw Debug Grid (Optional)
         line_renderer.render(
             quadtree.visible_nodes, 
-            camera.uv_pos, 
+            camera.pos, 
             camera.zoom
         )
         
-        # 4. Swap Buffers
+        # 4. Refresh Display
         pygame.display.flip()
         clock.tick(60)
         
-        # Optional: Title bar debug info
-        pygame.display.set_caption(f"FPS: {clock.get_fps():.1f} | Chunks: {len(quadtree.visible_nodes)} | Zoom: {camera.zoom:.2f}")
+        # Window Title Status
+        pygame.display.set_caption(f"FPS: {clock.get_fps():.1f} | Loaded Chunks: {len(data_manager.loaded_chunks)} | Zoom: {camera.zoom:.2f}")
 
     pygame.quit()
     sys.exit()

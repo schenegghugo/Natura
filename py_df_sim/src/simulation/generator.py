@@ -99,3 +99,40 @@ class TerrainGenerator:
         texture_data[land_mask] = land_colors
         
         return texture_data.tobytes()
+
+    def colorize_chunk(self, height_map):
+        """
+        Converts a 2D heightmap (float) into RGBA bytes.
+        """
+        # Create output array
+        # Shape matches input, adds 4 channels (RGBA)
+        texture_data = np.zeros((height_map.shape[0], height_map.shape[1], 4), dtype=np.uint8)
+        
+        # 1. Define Masks
+        water_mask = height_map < 0.5
+        land_mask = ~water_mask
+        
+        # 2. Water Color (Blue)
+        texture_data[water_mask] = [0, 0, 200, 255]
+        
+        # 3. Land Color (Green Gradient)
+        land_heights = height_map[land_mask]
+        
+        # Normalize land to 0.0-1.0 range for color intensity
+        # (Value - Min) / (Max - Min) -> (h - 0.5) / 0.5 -> (h - 0.5) * 2
+        val_norm = (land_heights - 0.5) * 2.0
+        
+        # Calculate Green brightness (55 to 255)
+        green_vals = (val_norm * 200 + 55).astype(np.uint8)
+        
+        # Assign to Green Channel
+        # We construct a temporary array for land pixels
+        land_colors = np.zeros((green_vals.shape[0], 4), dtype=np.uint8)
+        land_colors[:, 0] = 0          # R
+        land_colors[:, 1] = green_vals # G
+        land_colors[:, 2] = 0          # B
+        land_colors[:, 3] = 255        # A
+        
+        texture_data[land_mask] = land_colors
+        
+        return texture_data.tobytes()
