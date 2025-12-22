@@ -52,26 +52,13 @@ Infinite exploration requires aggressive garbage collection to prevent memory le
         New/Modified Chunks: Marked True. Written to disk on Save.
         Cached Chunks: Marked False. Ignored during Save operations. This "Delta Saving" approach means pressing F5 is near-instant, as it only writes the specific bits of data that changed since the last save.
 
-## Project Structure
+## Controls
 
-py_df_sim/
-├── saves/                  # Generated save files (auto-created)
-│   └── default/
-│       ├── world.json      # Global state (Seed, Camera X/Y, Zoom)
-│       └── chunks/         # .npy heightmap binary files
-├── src/
-│   ├── main.py             # Entry point & Game Loop
-│   ├── config.py           # Constants (Screen size, colors)
-│   ├── engine/
-│   │   ├── camera.py       # Infinite coordinate system & Physics
-│   │   ├── chunk_renderer.py # OpenGL Rendering logic
-│   │   ├── save_manager.py # Disk I/O (JSON & NPY handling)
-│   │   └── texture_manager.py # VRAM (Texture) Management
-│   ├── simulation/
-│   │   ├── data_manager.py # RAM Management, Caching & Pruning Logic
-│   │   ├── generator.py    # Math / Noise Generation
-│   │   ├── quadtree.py     # LOD Calculation
-│   │   └── chunk_data.py   # Data container + Dirty Flags
-│   └── shaders/
-│       ├── vertex.glsl     # Vertex Shader
-│       └── fragment.glsl   # Fragment Shader
+| Input | Action |
+| :--- | :--- |
+| **W, A, S, D** | Pan the Camera (Momentum based) |
+| **Left Click + Drag** | Pan the World (Google Maps style) |
+| **Scroll Wheel** | Zoom In / Out (Seamless LOD transition) |
+| **F5** | **Quick Save** (Saves position, zoom & modified chunks) |
+| **F9** | **Hot Reload** (Reloads save & wipes RAM/VRAM without restart) |
+| **ESC** | Quit |
