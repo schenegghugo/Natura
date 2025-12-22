@@ -57,8 +57,25 @@ class DataManager:
 
     def prune(self, visible_nodes):
         """
-        Optional: Removes chunks from RAM that are very far away.
-        If RAM usage gets high, we implement logic here to delete keys 
-        from self.loaded_chunks that aren't in visible_nodes.
+        Removes chunks from RAM that are no longer visible.
         """
-        pass
+        # 1. Identify keys to remove
+        current_keys = set(self.loaded_chunks.keys())
+        
+        # FIX: Construct the tuple manually from node attributes
+        visible_keys = set((n.x, n.y, n.level) for n in visible_nodes)
+        
+        # Calculate difference (Items in RAM but NOT in View)
+        to_remove = current_keys - visible_keys
+        
+        # 2. Delete them
+        for key in to_remove:
+            # We assume "dirty" chunks are mostly new generated ones.
+            # If we delete a dirty chunk without saving, that work is lost.
+            # However, auto-saving on prune causes stutter.
+            # For now, we accept that uncached data is lost until F5 is pressed.
+            del self.loaded_chunks[key]
+            
+        # Optional debug (Uncomment to see memory cleanup in action)
+        if len(to_remove) > 0:
+            print(f"Pruned {len(to_remove)} chunks. RAM: {len(self.loaded_chunks)}")

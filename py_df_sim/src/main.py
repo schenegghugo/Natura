@@ -125,7 +125,12 @@ def main():
         # 1. Update Quadtree
         # Calculates which chunks should be visible based on camera pos
         quadtree.update(camera.pos, camera.zoom)
-        
+
+        # ------------------------------
+        # Free up RAM for chunks we can't see anymore
+        data_manager.prune(quadtree.visible_nodes)
+        # ------------------------------
+
         # 2. Update Textures
         # - Checks Visible Nodes
         # - Asks DataManager for data (Check RAM -> Check Disk -> Generate)
