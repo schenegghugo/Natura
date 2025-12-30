@@ -6,56 +6,30 @@ class TextureManager:
         self.ctx = ctx
         self.pool_size = pool_size
         
-        # 1. Pre-allocate VRAM
-        # We create 'pool_size' empty textures immediately.
-        # This is our "Budget". We cannot exceed this.
-        self.textures = []
-        for _ in range(pool_size):
-            texture = self.ctx.texture((CHUNK_SIZE, CHUNK_SIZE), 4)
-            
-            # NEAREST = Pixelated look (Minecraft style)
-            # LINEAR = Smooth look (Simcity style)
-            texture.filter = (moderngl.NEAREST, moderngl.NEAREST) 
-            texture.swizzle = 'RGBA'
-            self.textures.append(texture)
-            
-        # 2. Tracking System
-        # available: List of indices [0, 1, 2... 63] that are currently empty.
-        self.available_indices = list(range(pool_size))
+        # 1. Texture Array 0: TERRAIN (RGBA)
+        self.terrain_array = ctx.texture_array((pool_size, CHUNK_SIZE, CHUNK_SIZE), 4, dtype='f4')
+        self.terrain_array.filter = (moderngl.NEAREST, moderngl.NEAREST)
         
-        # mapping: Dictionary linking a Chunk Coordinate to a Texture Index
-        # Key: (x, y, level) -> Value: texture_index (int)
+        # 2. Texture Array 1: ATMOSPHERE (RGBA)
+        self.atmos_array = ctx.texture_array((pool_size, CHUNK_SIZE, CHUNK_SIZE), 4, dtype='f4')
+        # Linear filter for clouds makes them look softer
+        self.atmos_array.filter = (moderngl.LINEAR, moderngl.LINEAR) 
+
+        self.available_indices = list(range(pool_size))
         self.node_to_texture_id = {}
 
     def update(self, visible_nodes, data_manager, generator): 
-        """
-        Syncs the GPU textures with the Quadtree.
-        1. Deletes textures for chunks that went off-screen.
-        2. Generates and Uploads textures for new chunks.
-        """
-        
-        # A. Identify what is currently needed
-        # We create a set of keys {(x,y,lvl), ...} for fast lookup
-        needed_keys = set()
-        for node in visible_nodes:
-            needed_keys.add((node.x, node.y, node.level))
+        # A. Identify needed keys
+        needed_keys = set((n.x, n.y, n.level) for n in visible_nodes)
             
-        # B. Garbage Collection (Unload old chunks)
-        # Look at every chunk we currently have loaded
-        # If it is NOT in the 'needed_keys' list, dump it.
-        # We wrap keys() in list() because we are modifying the dictionary during iteration
+        # B. Garbage Collection
         for key in list(self.node_to_texture_id.keys()):
             if key not in needed_keys:
-                # 1. Get the texture index being used
                 tex_id = self.node_to_texture_id[key]
-                
-                # 2. Remove from mapping
                 del self.node_to_texture_id[key]
-                
-                # 3. Return the index to the free pool
                 self.available_indices.append(tex_id)
 
-        # C. Loading (Upload new chunks)
+        # C. Loading
         for node in visible_nodes:
             key = (node.x, node.y, node.level)
             
@@ -66,25 +40,42 @@ class TextureManager:
                 tex_id = self.available_indices.pop()
                 self.node_to_texture_id[key] = tex_id
                 
-                # --- CHANGED SECTION START ---
-                
-                # 1. Get Data (From RAM or Generator)
+                # 1. Get Data (8 Layers)
                 chunk_data = data_manager.get_chunk(node.x, node.y, node.level)
+                full_data = chunk_data.height_map 
                 
-                # 2. Convert Data to Pixels (Using the helper we made)
-                pixel_data = generator.colorize_chunk(chunk_data.height_map)
+                # 2. Split Data
+                # Layers 0-3 -> Terrain
+                terrain_bytes = full_data[:, :, 0:4].tobytes()
                 
-                # --- CHANGED SECTION END ---
+                # Layers 4-7 -> Atmos
+                atmos_bytes = full_data[:, :, 4:8].tobytes()
                 
-                self.textures[tex_id].write(pixel_data)
+                # 3. Write to Specific Layer in Texture Array
+                # viewport defines which layer of the array we write to: (x, y, width, height, layer_index)
+                # Ideally, texture_array.write handles 3D data, but for specific layers in an array, 
+                # ModernGL requires passing the data for that specific slice.
+                
+                # NOTE: texture_array.write expects data for the WHOLE array or a viewport.
+                # To write to a single layer Z, we calculate offsets.
+                # Actually, simpler method in ModernGL for TextureArrays:
+                # We can't easily write to just one layer index using standard .write without complex viewports.
+                # BUT, since we built a texture_array, we treat it like a 3D texture.
+                
+                # Correction: The easiest way to manage this pool is actually unrelated to TextureArrays
+                # if we want to write individually easily. 
+                # HOWEVER, to keep your Quadtree logic fast, TextureArrays are best.
+                
+                # Let's use the specific write command for a layer:
+                self.terrain_array.write(terrain_bytes, viewport=(0, 0, tex_id, CHUNK_SIZE, CHUNK_SIZE, 1))
+                self.atmos_array.write(atmos_bytes, viewport=(0, 0, tex_id, CHUNK_SIZE, CHUNK_SIZE, 1))
 
-    def get_texture(self, node):
-        """
-        Returns the ModernGL texture object for a given node.
-        Returns None if not loaded (shouldn't happen if update is called first).
-        """
+    def bind_textures(self, location_terrain=0, location_atmos=1):
+        """Binds the entire arrays to the shader units"""
+        self.terrain_array.use(location=location_terrain)
+        self.atmos_array.use(location=location_atmos)
+
+    def get_texture_id(self, node):
+        """Returns the Z-index (layer) in the array for this node"""
         key = (node.x, node.y, node.level)
-        if key in self.node_to_texture_id:
-            tex_id = self.node_to_texture_id[key]
-            return self.textures[tex_id]
-        return None
+        return self.node_to_texture_id.get(key, -1)

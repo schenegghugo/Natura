@@ -4,135 +4,121 @@ from config import CHUNK_SIZE
 
 class TerrainGenerator:
     def __init__(self, seed=None):
-        self.seed = seed if seed else np.random.randint(0, 1000)
+        self.seed = seed if seed else 12345
         
-        # INCREASED SCALE: 
-        # 0.005 was too zoomed in (making it look like gradients/stretched lines).
-        # 0.02 lets us see "Features" (blobs, hills) within a single chunk.
+        # Scale Settings
         self.base_scale = 0.02 
-        
-        self.octaves = 4      # Reduced from 6 for speed
+        self.octaves = 4
         self.persistence = 0.5
         self.lacunarity = 2.0
+        
+        # Layer Offsets
+        # We use these to sample different parts of the infinite noise plane
+        # ensuring that Temperature doesn't look identical to Height, etc.
+        self.offsets = {
+            'temp':   50000,
+            'hum':    100000,
+            'bio':    150000,
+            'wind_x': 200000,
+            'wind_y': 250000,
+            'air_t':  300000,
+            'air_h':  350000
+        }
+
+    def _get_noise(self, gx, gy, offset, scale_mod=1.0, octaves=2):
+        """
+        Helper method to generate specific noise layers.
+        scale_mod: Multiplier for coordinates (lower = larger features).
+        """
+        return noise.pnoise2(
+            (gx + offset) * scale_mod, 
+            (gy + offset) * scale_mod, 
+            octaves=octaves, 
+            persistence=0.5, 
+            lacunarity=2.0
+        )
 
     def generate_chunk_data(self, cx, cy, level):
         """
-        Generates heightmap for a specific chunk.
+        Generates an 8-channel data chunk (Float32).
+        
+        Layers 0-3 (Terrain):
+          0: Height
+          1: Ground Temperature
+          2: Ground Humidity
+          3: Biomass/Magic
+          
+        Layers 4-7 (Atmosphere):
+          4: Wind X Direction
+          5: Wind Y Direction
+          6: Air Temperature
+          7: Air Humidity (Cloud Density)
         """
         # 1. Calculate Step Size based on Zoom Level
         step = self.base_scale / (2 ** level)
         
-        # 2. World Offsets
-        # We use a large multiplier (10000) for the seed to ensure different seeds 
-        # look vastly different, but we add it to the coordinates.
-        world_offset_x = (cx * CHUNK_SIZE * step) + self.seed
-        world_offset_y = (cy * CHUNK_SIZE * step) + self.seed
+        # 2. Base World Offsets for this chunk
+        base_wx = (cx * CHUNK_SIZE * step) + self.seed
+        base_wy = (cy * CHUNK_SIZE * step) + self.seed
         
-        # 3. Pre-allocate the array
-        data = np.zeros((CHUNK_SIZE, CHUNK_SIZE), dtype=np.float32)
+        # 3. Pre-allocate the array: (33, 33, 8)
+        data = np.zeros((CHUNK_SIZE, CHUNK_SIZE, 8), dtype=np.float32)
         
-        # 4. The Loop
-        # We iterate through every pixel of the chunk.
+        # 4. Loop through pixels
         for y in range(CHUNK_SIZE):
-            # Calculate the global Y coordinate for this row
-            global_y = world_offset_y + (y * step)
+            global_y = base_wy + (y * step)
             
             for x in range(CHUNK_SIZE):                
-                # Calculate the global X coordinate for this column
-                global_x = world_offset_x + (x * step)
+                global_x = base_wx + (x * step)
                 
-                # Generate Noise
-                # IMPORTANT: We removed 'repeatx' and 'repeaty'. 
-                # This allows the noise to be truly infinite.
-                n = noise.pnoise2(
+                # --- TERRAIN GENERATION (Layers 0-3) ---
+                
+                # Height (Standard rough terrain)
+                n_height = noise.pnoise2(
                     global_x, 
                     global_y, 
                     octaves=self.octaves, 
                     persistence=self.persistence, 
                     lacunarity=self.lacunarity
                 )
-                data[y, x] = n
+                
+                # Temperature (Smoother, large biomes)
+                n_temp = self._get_noise(global_x, global_y, self.offsets['temp'], scale_mod=0.5)
+                
+                # Humidity (Smoother, large biomes)
+                n_hum = self._get_noise(global_x, global_y, self.offsets['hum'], scale_mod=0.5)
+                
+                # Biomass (Detail layer)
+                n_bio = self._get_noise(global_x, global_y, self.offsets['bio'], scale_mod=2.0, octaves=1)
 
-        # Normalize [-1, 1] -> [0, 1]
-        data = (data + 1) / 2.0
-        
-        # FIX: DO NOT FLIP. 
-        # Index 0 is Low Y. OpenGL puts Index 0 at Bottom. 
-        # This matches perfectly.
+
+                # --- ATMOSPHERE GENERATION (Layers 4-7) ---
+                
+                # Wind Vectors (Large swirling patterns)
+                n_wx = self._get_noise(global_x, global_y, self.offsets['wind_x'], scale_mod=0.3)
+                n_wy = self._get_noise(global_x, global_y, self.offsets['wind_y'], scale_mod=0.3)
+                
+                # Air Temp (Can differ from ground temp)
+                n_at = self._get_noise(global_x, global_y, self.offsets['air_t'], scale_mod=0.4)
+                
+                # Cloud Density (High frequency for fluffy clouds)
+                n_ah = self._get_noise(global_x, global_y, self.offsets['air_h'], scale_mod=1.5)
+
+
+                # --- NORMALIZATION & STORAGE ---
+                # We normalize all noise from approx [-1, 1] to [0, 1]
+                # This makes shader logic consistent.
+                
+                # Terrain
+                data[y, x, 0] = (n_height + 1) / 2.0
+                data[y, x, 1] = (n_temp + 1) / 2.0
+                data[y, x, 2] = (n_hum + 1) / 2.0
+                data[y, x, 3] = (n_bio + 1) / 2.0
+                
+                # Atmosphere
+                data[y, x, 4] = (n_wx + 1) / 2.0 # 0.5 = No Wind
+                data[y, x, 5] = (n_wy + 1) / 2.0 # 0.5 = No Wind
+                data[y, x, 6] = (n_at + 1) / 2.0
+                data[y, x, 7] = (n_ah + 1) / 2.0
+
         return data
-
-    def generate_chunk_texture(self, cx, cy, level):
-        height_map = self.generate_chunk_data(cx, cy, level)
-        
-        # Create RGBA array
-        texture_data = np.zeros((CHUNK_SIZE, CHUNK_SIZE, 4), dtype=np.uint8)
-        
-        # Determine Water/Land
-        water_mask = height_map < 0.5
-        land_mask = ~water_mask
-        
-        # Water: Blue
-        texture_data[water_mask] = [0, 0, 200, 255]
-        
-        # Land: Green Gradient
-        # Map height 0.5-1.0 to color 50-255
-        land_heights = height_map[land_mask]
-        
-        # Normalize land heights to 0.0 - 1.0 relative to land mass
-        # (val - min) / (max - min)
-        # Note: We safeguard against division by zero if a chunk is perfectly flat
-        val_norm = (land_heights - 0.5) * 2.0 
-        
-        green_vals = (val_norm * 200 + 55).astype(np.uint8)
-        
-        # We need to assign this properly to the green channel
-        # Advanced indexing in numpy can be tricky with multiple dimensions.
-        # Let's do it explicitly:
-        
-        # Create a temporary land color array
-        land_colors = np.zeros((np.count_nonzero(land_mask), 4), dtype=np.uint8)
-        land_colors[:, 0] = 0           # R
-        land_colors[:, 1] = green_vals  # G
-        land_colors[:, 2] = 0           # B
-        land_colors[:, 3] = 255         # A
-        
-        texture_data[land_mask] = land_colors
-        
-        return texture_data.tobytes()
-
-    def colorize_chunk(self, height_map):
-        """
-        Converts a 2D heightmap (float) into RGBA bytes.
-        """
-        # Create output array
-        # Shape matches input, adds 4 channels (RGBA)
-        texture_data = np.zeros((height_map.shape[0], height_map.shape[1], 4), dtype=np.uint8)
-        
-        # 1. Define Masks
-        water_mask = height_map < 0.5
-        land_mask = ~water_mask
-        
-        # 2. Water Color (Blue)
-        texture_data[water_mask] = [0, 0, 200, 255]
-        
-        # 3. Land Color (Green Gradient)
-        land_heights = height_map[land_mask]
-        
-        # Normalize land to 0.0-1.0 range for color intensity
-        # (Value - Min) / (Max - Min) -> (h - 0.5) / 0.5 -> (h - 0.5) * 2
-        val_norm = (land_heights - 0.5) * 2.0
-        
-        # Calculate Green brightness (55 to 255)
-        green_vals = (val_norm * 200 + 55).astype(np.uint8)
-        
-        # Assign to Green Channel
-        # We construct a temporary array for land pixels
-        land_colors = np.zeros((green_vals.shape[0], 4), dtype=np.uint8)
-        land_colors[:, 0] = 0          # R
-        land_colors[:, 1] = green_vals # G
-        land_colors[:, 2] = 0          # B
-        land_colors[:, 3] = 255        # A
-        
-        texture_data[land_mask] = land_colors
-        
-        return texture_data.tobytes()
