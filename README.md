@@ -1,64 +1,98 @@
-## Installation & Setup
+# Natura (py_df_sim)
 
-1. Prerequisites
+**Natura** is a high-performance, infinite procedural world simulation engine written in Python. It utilizes **ModernGL** for GPU acceleration, moving the heavy lifting of biome calculation and weather rendering from the CPU to the Fragment Shader.
 
-    Python 3.10 or higher.
-    A Graphics Card supporting OpenGL 3.3+.
+The engine uses a **Quadtree-based Level of Detail (LOD)** system to render massive worlds with seamless zooming, from planetary views down to individual pixels.
 
-2. Install Dependencies
+## 🚀 Key Features
 
-    pip install pygame moderngl numpy noise
+*   **Infinite Procedural Terrain:** Generates terrain on-the-fly using Perlin noise.
+*   **GPU-Driven Biomes:** The CPU sends raw data; the GPU determines if a pixel is a Jungle, Desert, Ocean, or Snow based on height, temperature, and humidity.
+*   **8-Layer Data Simulation:**
+    *   **Terrain:** Height, Ground Temperature, Humidity, Biomass.
+    *   **Atmosphere:** Wind Vector (X, Y), Air Temperature, Cloud Density.
+*   **Dynamic Weather:** Real-time, animated rain, snow, and cloud cover simulated entirely in the shader.
+*   **High Precision:** Uses `Float32` texture arrays for accurate physics simulation.
+*   **Chunk Serialization:** Saves/Loads generated chunks to disk to persist world state.
 
-3. Run the Engine
+---
 
-    python src/main.py
+## Architecture: The "Data Sandwich"
 
-## Architecture & Core Concepts
+Unlike traditional engines that generate a color texture on the CPU, Natura generates **raw physics data**.
 
-1. Dynamic Level of Detail (LOD) via Quadtree
+1.  **CPU (`generator.py`):** Generates an `(8, 33, 33)` NumPy array of raw floats for every chunk.
+2.  **VRAM (`texture_manager.py`):** Data is uploaded to **Texture Arrays** using floating-point precision (`dtype='f4'`).
+3.  **GPU (`chunk.glsl`):**
+    *   **Vertex Shader:** Handles positioning and camera zoom/pan.
+    *   **Fragment Shader:** Reads the 8 data layers, mixes them, calculates lighting/colors, and renders animated weather effects (Rain/Snow) based on the `Wind` vectors and `Time`.
 
-The engine abandons the traditional fixed-grid approach in favor of a recursive Quadtree structure. This allows for an infinite coordinate system where detail is relative to the camera's perspective.
+---
 
-    Recursive Subdivision: As the camera zooms in, visible nodes split into smaller children, increasing vertex density only where needed.
-    Screen-Space Error Metric: The system ensures that a chunk covering 100 pixels on screen has roughly the same vertex count whether it represents 1 meter or 10 kilometers of terrain.
-    Result: Visual fidelity remains constant while rendering performance stays stable (O(1) complexity relative to world size).
+## Project Structure
 
-2. The Three-Tier Data Pipeline
+```text
+py_df_sim/
+├── assets/
+│   └── shaders/
+│       ├── chunk.glsl       # The core logic: Biomes & Weather rendering
+│       ├── vertex.glsl      # UI/Debug shaders
+│       └── fragment.glsl    # UI/Debug shaders
+├── saves/                   # World data storage (JSON + Binary chunks)
+├── src/
+│   ├── main.py              # Entry point
+│   ├── config.py            # Global constants (Screen size, Chunk size)
+│   ├── engine/              # Graphics & IO System
+│   │   ├── chunk_renderer.py  # Manages the VBOs and Shader Uniforms
+│   │   ├── texture_manager.py # Handles VRAM allocation & Texture Arrays
+│   │   ├── camera.py          # Coordinate transformation
+│   │   └── input.py           # Mouse/Keyboard handling
+│   ├── simulation/          # Game Logic & Data Generation
+│   │   ├── generator.py       # Noise generation (The 8-layer data source)
+│   │   ├── quadtree.py        # LOD management
+│   │   ├── data_manager.py    # Caching and fetching chunk data
+│   │   └── world.py           # High-level simulation coordinator
+│   └── utils/               # Helper functions
+│       └── noise.py           # Perlin noise wrappers
+└── requirements.txt         # Python dependencies
+```
 
-To manage an infinite world with finite resources, the DataManager treats terrain data as a fluid resource flowing through three states of existence. When the renderer requests a chunk, the engine follows this strict fallback chain:
+## Installation
 
-    RAM (The Cache):
-        Priority: Immediate access.
-        Storage: Python Dictionary of ChunkData objects.
-        Role: Holds the "Active Set"—chunks currently inside the viewport.
-    DISK (The Persistence Layer):
-        Priority: Fallback if RAM misses.
-        Storage: Compressed NumPy binaries (.npy) indexed by coordinates.
-        Role: Stores the "Passive Set"—chunks previously visited or modified but currently out of view.
-    VOID (The Generator):
-        Priority: Final fallback.
-        Storage: None (Pure Mathematics).
-        Role: Generates fresh terrain using deterministic Perlin Noise for coordinates never visited before.
+1.  **Create a Virtual Environment:**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # Linux/Mac
+    # venv\Scripts\activate   # Windows
+    ```
 
-3. Aggressive Memory Management
+2.  **Install Dependencies:**
+    ```bash
+    pip install -r py_df_sim/requirements.txt
+    ```
+    *Core dependencies:* `moderngl`, `numpy`, `glfw`, `noise`.
 
-Infinite exploration requires aggressive garbage collection to prevent memory leaks and ensure smooth performance.
+## Usage
 
-    Visibility Pruning:
-    The engine runs a cleanup cycle every frame. It calculates the difference between the Loaded Set (RAM) and the Visible Set (Quadtree). Any chunk that leaves the camera's view is immediately evicted from RAM, ensuring memory usage stays flat regardless of session length.
+**Run the simulation:**
+```bash
+python py_df_sim/src/main.py
+```
 
-    Smart Serialization (Dirty Flags):
-    To avoid IO bottlenecks during saving, every chunk tracks its own state via an is_dirty flag.
-        New/Modified Chunks: Marked True. Written to disk on Save.
-        Cached Chunks: Marked False. Ignored during Save operations. This "Delta Saving" approach means pressing F5 is near-instant, as it only writes the specific bits of data that changed since the last save.
+**Controls:**
+*   **WASD / Arrow Keys:** Pan the camera.
+*   **Scroll Wheel:** Zoom in/out.
+*   **ESC:** Quit.
 
-## Controls
+## ⚠️ Note on Save Files
 
-| Input | Action |
-| :--- | :--- |
-| **W, A, S, D** | Pan the Camera (Momentum based) |
-| **Left Click + Drag** | Pan the World (Google Maps style) |
-| **Scroll Wheel** | Zoom In / Out (Seamless LOD transition) |
-| **F5** | **Quick Save** (Saves position, zoom & modified chunks) |
-| **F9** | **Hot Reload** (Reloads save & wipes RAM/VRAM without restart) |
-| **ESC** | Quit |
+Because the engine now uses an 8-layer float data format, **old save files are incompatible**.
+If the engine crashes on load, delete the `saves/` folder:
+
+```bash
+rm -rf py_df_sim/saves/
+```
+
+## 📜 License
+
+MIT
