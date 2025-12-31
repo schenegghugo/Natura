@@ -12,6 +12,10 @@ class Celestials:
         self.lunar_declination = 0.0
         self.lunar_gha = 0.0
         
+        # NEW: How "full" is the moon? (0.0 to 1.0)
+        # Used by fragment shader to dim the moon during New Moon phase
+        self.moon_phase_intensity = 0.0 
+        
         # --- CONSTANTS (The Physics) ---
         # 1. Earth's Axial Tilt (Obliquity of the Ecliptic)
         self.epsilon = math.radians(23.44) 
@@ -93,20 +97,23 @@ class Celestials:
         # D. Lunar GHA
         # We need the difference between Sun and Moon (Phase) to determine offset.
         # Phase Angle = Moon Longitude - Sun Longitude
-        # But we need to project this onto the Equator for GHA.
-        # A solid approximation for GHA is:
-        # GHA_Moon = GHA_Sun - (RightAscension_Moon - RightAscension_Sun)
-        
-        # Let's calculate Right Ascension (RA) for both
-        ra_sun = math.atan2(math.cos(self.epsilon) * math.sin(sun_long), math.cos(sun_long))
-        
-        # RA Moon (Simplified projection onto ecliptic longitude for RA is usually close enough for games,
-        # but let's do the atan2 to be safe)
-        # y = sin(long)*cos(eps) - tan(lat)*sin(eps)  <-- Full formula is messy
-        # Let's stick to the Phase Lag Logic relative to the Sun's GHA, but use the calculated Longitudes.
         
         # Difference in Ecliptic Longitude (How far Moon is from Sun)
         long_diff = moon_long - sun_long
         
         # The Moon lags the Sun by this longitudinal difference
         self.lunar_gha = self.greenwich_hour_angle - long_diff
+
+        # =========================================================
+        # 4. PHASE MAGNITUDE (Illumination)
+        # =========================================================
+        # The brightness depends on the angle between Sun and Moon.
+        # Angle 0 (New Moon) -> cos(0) = 1 -> Intensity 0
+        # Angle 180 (Full Moon) -> cos(PI) = -1 -> Intensity 1
+        
+        # We use (1 - cos(theta)) / 2 to normalize to 0..1 range
+        phase_angle = long_diff
+        self.moon_phase_intensity = (1.0 - math.cos(phase_angle)) * 0.5
+        
+        # Slight boost to gamma correction so half-moons aren't too dim
+        self.moon_phase_intensity = pow(self.moon_phase_intensity, 0.8)

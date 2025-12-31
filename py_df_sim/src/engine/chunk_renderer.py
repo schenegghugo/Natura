@@ -9,6 +9,7 @@ class ChunkRenderer:
         self.ctx = ctx
         
         # --- PATH LOGIC ---
+        # Robustly find the shader file regardless of where main.py is run from
         script_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(os.path.dirname(script_dir))
         shader_path = os.path.join(project_root, "assets", "shaders", "chunk.glsl")
@@ -26,13 +27,13 @@ class ChunkRenderer:
         version_line = lines[0] 
         rest_of_code = "\n".join(lines[1:])
         
-        # Compile one program for both stages
+        # Compile one program for both stages (Vertex & Fragment)
         self.prog = self.ctx.program(
             vertex_shader=f"{version_line}\n#define VERTEX_SHADER\n{rest_of_code}",
             fragment_shader=f"{version_line}\n#define FRAGMENT_SHADER\n{rest_of_code}",
         )
             
-        # Basic Quad (0,0 to 1,1)
+        # Basic Quad (0,0 to 1,1) covering the chunk area
         vertices = np.array([
             0.0, 0.0,
             1.0, 0.0,
@@ -65,6 +66,7 @@ class ChunkRenderer:
         if 'u_zoom' in self.prog:
             self.prog['u_zoom'].value = zoom
         if 'u_aspect_ratio' in self.prog:
+            # Corrects geometric distortion on wide screens
             self.prog['u_aspect_ratio'].value = config.SCREEN_HEIGHT / config.SCREEN_WIDTH
         
         # System Time (for rain/water animations, distinct from game time)
@@ -98,8 +100,26 @@ class ChunkRenderer:
         if 'u_LunarGHA' in self.prog:
             self.prog['u_LunarGHA'].value = celestials.lunar_gha
 
+        # Phase Intensity
+        if 'u_MoonPhase' in self.prog:
+            self.prog['u_MoonPhase'].value = celestials.moon_phase_intensity
+
         # -----------------------------------------------------------------
-        # 4. TEXTURE BINDING
+        # 4. TERRAIN PHYSICS UNIFORMS (New for Raymarching)
+        # -----------------------------------------------------------------
+        # These help the shader calculate slopes and shadows correctly
+        
+        if 'u_HeightScale' in self.prog:
+            # Exaggerates the height map. Higher values = steeper mountains = deeper shadows.
+            self.prog['u_HeightScale'].value = 40.0 
+            
+        if 'u_TexRes' in self.prog:
+            # The resolution of the chunk (e.g., 128). 
+            # Needed to calculate the size of 1 pixel for neighbor sampling.
+            self.prog['u_TexRes'].value = float(config.CHUNK_SIZE)
+
+        # -----------------------------------------------------------------
+        # 5. TEXTURE BINDING
         # -----------------------------------------------------------------
         texture_manager.bind_textures(location_terrain=0, location_atmos=1)
         
@@ -109,7 +129,7 @@ class ChunkRenderer:
             self.prog['u_atmos_arr'].value = 1
         
         # -----------------------------------------------------------------
-        # 5. RENDER LOOP
+        # 6. RENDER LOOP
         # -----------------------------------------------------------------
         for node in visible_nodes:
             layer_id = texture_manager.get_texture_id(node)

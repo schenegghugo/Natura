@@ -1,5 +1,6 @@
 import numpy as np
 import noise
+import math
 from config import CHUNK_SIZE
 
 class TerrainGenerator:
@@ -12,9 +13,12 @@ class TerrainGenerator:
         self.persistence = 0.5
         self.lacunarity = 2.0
         
+        # Exponent for terrain sharpness
+        # 1.0 = Linear
+        # 3.0 = Cubic (Flat coasts, Deep Trenches, Steep Peaks)
+        self.height_exponent = 3.0 
+        
         # Layer Offsets
-        # We use these to sample different parts of the infinite noise plane
-        # ensuring that Temperature doesn't look identical to Height, etc.
         self.offsets = {
             'temp':   50000,
             'hum':    100000,
@@ -28,7 +32,6 @@ class TerrainGenerator:
     def _get_noise(self, gx, gy, offset, scale_mod=1.0, octaves=2):
         """
         Helper method to generate specific noise layers.
-        scale_mod: Multiplier for coordinates (lower = larger features).
         """
         return noise.pnoise2(
             (gx + offset) * scale_mod, 
@@ -41,27 +44,15 @@ class TerrainGenerator:
     def generate_chunk_data(self, cx, cy, level):
         """
         Generates an 8-channel data chunk (Float32).
-        
-        Layers 0-3 (Terrain):
-          0: Height
-          1: Ground Temperature
-          2: Ground Humidity
-          3: Biomass/Magic
-          
-        Layers 4-7 (Atmosphere):
-          4: Wind X Direction
-          5: Wind Y Direction
-          6: Air Temperature
-          7: Air Humidity (Cloud Density)
         """
-        # 1. Calculate Step Size based on Zoom Level
+        # 1. Calculate Step Size
         step = self.base_scale / (2 ** level)
         
-        # 2. Base World Offsets for this chunk
+        # 2. Base World Offsets
         base_wx = (cx * CHUNK_SIZE * step) + self.seed
         base_wy = (cy * CHUNK_SIZE * step) + self.seed
         
-        # 3. Pre-allocate the array: (33, 33, 8)
+        # 3. Pre-allocate array
         data = np.zeros((CHUNK_SIZE, CHUNK_SIZE, 8), dtype=np.float32)
         
         # 4. Loop through pixels
@@ -72,8 +63,8 @@ class TerrainGenerator:
                 global_x = base_wx + (x * step)
                 
                 # --- TERRAIN GENERATION (Layers 0-3) ---
-                
-                # Height (Standard rough terrain)
+                                
+                # 1. Raw Height Noise (-1.0 to 1.0)
                 n_height = noise.pnoise2(
                     global_x, 
                     global_y, 
@@ -82,42 +73,51 @@ class TerrainGenerator:
                     lacunarity=self.lacunarity
                 )
                 
-                # Temperature (Smoother, large biomes)
+                # 2. Normalize to 0.0 -> 1.0
+                h_norm = (n_height + 1) / 2.0
+                
+                # 3. Apply Polynomial Curve (x^3 + x)
+                # This creates a "rolling" slope at sea level (linear) 
+                # but still gets steeper towards peaks and trenches.
+                
+                # Shift to -1..1 (and clamp to prevent noise artifacts exploding)
+                h_signed = max(-1.0, min(1.0, (h_norm - 0.5) * 2.0))
+                
+                # Apply f(x) = x^3 + x
+                # Resulting range is approx -2.0 to 2.0
+                h_poly = (h_signed ** 3) + h_signed
+                
+                # Normalize polynomial result back to -1..1
+                # We divide by 2.0 because the max possible value is (1^3 + 1) = 2
+                h_curved = h_poly / 2.0
+                
+                # Shift back to 0..1 for storage
+                h_final = (h_curved / 2.0) + 0.5                
+                # ----------------------------------------------------
+
+                # Temperature
                 n_temp = self._get_noise(global_x, global_y, self.offsets['temp'], scale_mod=0.5)
                 
-                # Humidity (Smoother, large biomes)
+                # Humidity
                 n_hum = self._get_noise(global_x, global_y, self.offsets['hum'], scale_mod=0.5)
                 
-                # Biomass (Detail layer)
+                # Biomass
                 n_bio = self._get_noise(global_x, global_y, self.offsets['bio'], scale_mod=2.0, octaves=1)
 
-
                 # --- ATMOSPHERE GENERATION (Layers 4-7) ---
-                
-                # Wind Vectors (Large swirling patterns)
                 n_wx = self._get_noise(global_x, global_y, self.offsets['wind_x'], scale_mod=0.3)
                 n_wy = self._get_noise(global_x, global_y, self.offsets['wind_y'], scale_mod=0.3)
-                
-                # Air Temp (Can differ from ground temp)
                 n_at = self._get_noise(global_x, global_y, self.offsets['air_t'], scale_mod=0.4)
-                
-                # Cloud Density (High frequency for fluffy clouds)
                 n_ah = self._get_noise(global_x, global_y, self.offsets['air_h'], scale_mod=1.5)
 
-
-                # --- NORMALIZATION & STORAGE ---
-                # We normalize all noise from approx [-1, 1] to [0, 1]
-                # This makes shader logic consistent.
-                
-                # Terrain
-                data[y, x, 0] = (n_height + 1) / 2.0
+                # --- STORAGE ---
+                data[y, x, 0] = h_final  # Storing the curved height
                 data[y, x, 1] = (n_temp + 1) / 2.0
                 data[y, x, 2] = (n_hum + 1) / 2.0
                 data[y, x, 3] = (n_bio + 1) / 2.0
                 
-                # Atmosphere
-                data[y, x, 4] = (n_wx + 1) / 2.0 # 0.5 = No Wind
-                data[y, x, 5] = (n_wy + 1) / 2.0 # 0.5 = No Wind
+                data[y, x, 4] = (n_wx + 1) / 2.0 
+                data[y, x, 5] = (n_wy + 1) / 2.0 
                 data[y, x, 6] = (n_at + 1) / 2.0
                 data[y, x, 7] = (n_ah + 1) / 2.0
 
